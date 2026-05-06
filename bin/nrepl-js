@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+// CLI entry point. Connects to a running `node --inspect` and serves an nREPL
+// over TCP.
+
+import fs from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+import { start } from '../src/index.js';
+
+function parseArgs(argv) {
+  const args = { port: 0, host: '127.0.0.1', inspectHost: '127.0.0.1', inspectPort: 9229, spawn: null, writePortFile: true };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = () => argv[++i];
+    if (a === '--port') args.port = Number(next());
+    else if (a === '--host') args.host = next();
+    else if (a === '--inspect-host') args.inspectHost = next();
+    else if (a === '--inspect-port') args.inspectPort = Number(next());
+    else if (a === '--spawn') args.spawn = next();
+    else if (a === '--no-port-file') args.writePortFile = false;
+    else if (a === '-h' || a === '--help') {
+      console.log(`nrepl-js — nREPL server backed by the V8 Inspector
+
+Usage: nrepl-js [options]
+  --port <p>            nREPL TCP port (default: 0 = OS-assigned)
+  --host <h>            bind host (default: 127.0.0.1)
+  --inspect-host <h>    inspector host (default: 127.0.0.1)
+  --inspect-port <p>    inspector port (default: 9229)
+  --spawn <file>        spawn 'node --inspect=0 <file>' and attach to it
+  --no-port-file        don't write .nrepl-port to cwd
+`);
+      process.exit(0);
+    } else {
+      console.error('unknown arg:', a);
+      process.exit(2);
+    }
+  }
+  return args;
+}
+
+async function spawnInspected(file) {
+  const child = spawn(process.execPath, ['--inspect=0', file], { stdio: ['inherit', 'inherit', 'pipe'] });
+  const port = await new Promise((resolve, reject) => {
+    let buf = '';
+    const onData = (chunk) => {
+      const s = chunk.toString('utf8');
+      process.stderr.write(s);
+      buf += s;
+      const m = buf.match(/Debugger listening on ws:\/\/[^:]+:(\d+)/);
+      if (m) { child.stderr.off('data', onData); child.stderr.on('data', (c) => process.stderr.write(c)); resolve(Number(m[1])); }
+    };
+    child.stderr.on('data', onData);
+    child.once('exit', (code) => reject(new Error('spawned node exited: ' + code)));
+    setTimeout(() => reject(new Error('inspector port timeout')), 5000);
+  });
+  return { child, inspectPort: port };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  let child;
+  if (args.spawn) {
+    const r = await spawnInspected(args.spawn);
+    child = r.child;
+    args.inspectPort = r.inspectPort;
+  }
+
+  const handle = await start({
+    inspectHost: args.inspectHost,
+    inspectPort: args.inspectPort,
+    port: args.port,
+    host: args.host,
+  });
+
+  console.log(`nREPL server listening on ${args.host}:${handle.port} (attached to inspector ${args.inspectHost}:${args.inspectPort})`);
+
+  if (args.writePortFile) {
+    try {
+      await fs.writeFile(path.join(process.cwd(), '.nrepl-port'), String(handle.port));
+    } catch (err) {
+      console.error('warning: could not write .nrepl-port:', err.message);
+    }
+  }
+
+  const shutdown = async (sig) => {
+    console.error('\nshutting down (' + sig + ')');
+    try { await handle.close(); } catch {}
+    if (child) try { child.kill(); } catch {}
+    if (args.writePortFile) { try { await fs.unlink(path.join(process.cwd(), '.nrepl-port')); } catch {} }
+    process.exit(0);
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+main().catch((err) => {
+  console.error('nrepl-js failed:', err.message);
+  process.exit(1);
+});
