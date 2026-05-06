@@ -8,7 +8,7 @@ import path from 'node:path';
 import { start } from '../src/index.js';
 
 function parseArgs(argv) {
-  const args = { port: 0, host: '127.0.0.1', inspectHost: '127.0.0.1', inspectPort: 9229, spawn: null, writePortFile: true };
+  const args = { port: 0, host: '127.0.0.1', inspectHost: '127.0.0.1', inspectPort: 9229, spawn: null, writePortFile: true, debug: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -18,6 +18,7 @@ function parseArgs(argv) {
     else if (a === '--inspect-port') args.inspectPort = Number(next());
     else if (a === '--spawn') args.spawn = next();
     else if (a === '--no-port-file') args.writePortFile = false;
+    else if (a === '--debug') args.debug = true;
     else if (a === '-h' || a === '--help') {
       console.log(`nrepl-js — nREPL server backed by the V8 Inspector
 
@@ -28,6 +29,7 @@ Usage: nrepl-js [options]
   --inspect-port <p>    inspector port (default: 9229)
   --spawn <file>        spawn 'node --inspect=0 <file>' and attach to it
   --no-port-file        don't write .nrepl-port to cwd
+  --debug               log incoming (<-) and outgoing (->) nREPL messages to stdout
 `);
       process.exit(0);
     } else {
@@ -70,6 +72,7 @@ async function main() {
     inspectPort: args.inspectPort,
     port: args.port,
     host: args.host,
+    debug: args.debug,
   });
 
   console.log(`nREPL server listening on ${args.host}:${handle.port} (attached to inspector ${args.inspectHost}:${args.inspectPort})`);

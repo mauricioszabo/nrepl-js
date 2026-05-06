@@ -7,7 +7,7 @@ import { encode, decode } from '../bencode.js';
 import { dispatch } from './ops.js';
 import { attachConsole } from '../console.js';
 
-export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1' }) {
+export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', debug = false }) {
   // One global execution context discovered from the inspector.
   let defaultContextId;
   try {
@@ -57,7 +57,7 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1' }
     }
   });
 
-  const server = net.createServer((socket) => handleConnection(socket, ctx));
+  const server = net.createServer((socket) => handleConnection(socket, ctx, debug));
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => resolve());
@@ -65,7 +65,7 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1' }
   return { server, port: server.address().port, host, ctx };
 }
 
-function handleConnection(socket, ctx) {
+function handleConnection(socket, ctx, debug) {
   let buf = Buffer.alloc(0);
   const sessions = new Set(); // sessions opened on this connection
 
@@ -73,6 +73,7 @@ function handleConnection(socket, ctx) {
     socket,
     sessions,
     send(msg) {
+      if (debug) console.log(' ->', JSON.stringify(msg));
       try { socket.write(encode(msg)); } catch {}
     },
   };
@@ -85,6 +86,7 @@ function handleConnection(socket, ctx) {
       if (!r) break;
       buf = r.rest;
       const msg = r.value;
+      if (debug) console.log(' <-', JSON.stringify(msg));
       const send = (m) => conn.send(m);
       const before = new Set(ctx.sessions.keys());
       try {
