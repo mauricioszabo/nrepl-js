@@ -3,11 +3,25 @@
 // from a per-connection buffer.
 
 import net from 'node:net';
+import fs from 'node:fs';
 import { encode, decode } from '../bencode.js';
 import { dispatch } from './ops.js';
 import { attachConsole } from '../console.js';
 
+// Open /dev/tty so debug output goes directly to the terminal even when
+// stdout is piped to a parent process (e.g. an editor reading nREPL over stdio).
+function openDebugSink() {
+  try {
+    const fd = fs.openSync('/dev/tty', 'w');
+    return (line) => fs.writeSync(fd, line + '\n');
+  } catch {
+    // Fallback: stderr. At least it won't corrupt a bencode stream on stdout.
+    return (line) => process.stderr.write(line + '\n');
+  }
+}
+
 export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', debug = false }) {
+  const dbg = debug ? openDebugSink() : null;
   // One global execution context discovered from the inspector.
   let defaultContextId;
   try {
@@ -57,7 +71,7 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', 
     }
   });
 
-  const server = net.createServer((socket) => handleConnection(socket, ctx, debug));
+  const server = net.createServer((socket) => handleConnection(socket, ctx, dbg));
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => resolve());
@@ -65,7 +79,7 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', 
   return { server, port: server.address().port, host, ctx };
 }
 
-function handleConnection(socket, ctx, debug) {
+function handleConnection(socket, ctx, dbg) {
   let buf = Buffer.alloc(0);
   const sessions = new Set(); // sessions opened on this connection
 
@@ -73,7 +87,7 @@ function handleConnection(socket, ctx, debug) {
     socket,
     sessions,
     send(msg) {
-      if (debug) console.log(' ->', JSON.stringify(msg));
+      if (dbg) dbg(' -> ' + JSON.stringify(msg));
       try { socket.write(encode(msg)); } catch {}
     },
   };
@@ -86,7 +100,7 @@ function handleConnection(socket, ctx, debug) {
       if (!r) break;
       buf = r.rest;
       const msg = r.value;
-      if (debug) console.log(' <-', JSON.stringify(msg));
+      if (dbg) dbg(' <- ' + JSON.stringify(msg));
       const send = (m) => conn.send(m);
       const before = new Set(ctx.sessions.keys());
       try {
