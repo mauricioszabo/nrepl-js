@@ -4,6 +4,7 @@
 
 import { formatRemoteObject, formatException } from '../format.js';
 import { parseAsTopLevelDecls, patchScript, findTopLevelDecl } from '../patch.js';
+import { scopeEval } from '../scope-eval.js';
 import * as acorn from 'acorn';
 
 export async function handleEval({ msg, session, cdp, scripts, send }) {
@@ -13,7 +14,9 @@ export async function handleEval({ msg, session, cdp, scripts, send }) {
   if (file) {
     const scriptId = scripts.scriptIdForPath(file);
     const decls = parseAsTopLevelDecls(code);
-    if (scriptId && decls && allDeclsExist(cdp, scriptId, decls, scripts)) {
+
+    // Named top-level declarations → live-patch the script.
+    if (scriptId && decls) {
       try {
         const res = await patchScript(cdp, scriptId, code);
         if (res.status !== 'Ok') {
@@ -28,6 +31,27 @@ export async function handleEval({ msg, session, cdp, scripts, send }) {
       } catch (err) {
         send({ id: msg.id, session: session.id, err: 'patch error: ' + err.message + '\n' });
         send({ id: msg.id, session: session.id, status: ['done', 'patch-failed'] });
+        return;
+      }
+    }
+
+    // Expression/statement (not top-level decls) with a known file → scope eval.
+    if (scriptId && !decls) {
+      try {
+        const res = await scopeEval({ cdp, scriptId, filePath: file, code });
+        if (res.exceptionDetails) {
+          const { text, className } = formatException(res.exceptionDetails);
+          send({ id: msg.id, session: session.id, err: text + '\n' });
+          send({ id: msg.id, session: session.id, ex: className, 'root-ex': className });
+          send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
+        } else {
+          send({ id: msg.id, session: session.id, value: formatRemoteObject(res.result) });
+          send({ id: msg.id, session: session.id, status: ['done'] });
+        }
+        return;
+      } catch (err) {
+        send({ id: msg.id, session: session.id, err: 'scope eval error: ' + err.message + '\n' });
+        send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
         return;
       }
     }
