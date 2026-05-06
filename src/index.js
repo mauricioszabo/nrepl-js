@@ -9,15 +9,23 @@ export async function start({ inspectHost = '127.0.0.1', inspectPort = 9229, por
   const wsUrl = await discover({ host: inspectHost, port: inspectPort });
   const cdp = await connect(wsUrl);
   const scripts = createScriptRegistry(cdp);
-  const { server, port: actualPort } = await startServer({ cdp, scripts, port, host, debug });
+  const { server, port: actualPort, ctx } = await startServer({ cdp, scripts, port, host, debug });
   return {
     port: actualPort,
     host,
     cdp,
     server,
+    ctx,
     async close() {
-      await new Promise((r) => server.close(() => r()));
+      // Close the CDP connection first so the inspected process doesn't hang
+      // printing "Waiting for the debugger to disconnect...".
       cdp.close();
+      // Destroy all active nREPL client sockets so server.close() resolves
+      // immediately instead of waiting for them to finish on their own.
+      for (const conn of ctx.connections) {
+        try { conn.socket.destroy(); } catch {}
+      }
+      await new Promise((r) => server.close(() => r()));
     },
   };
 }
