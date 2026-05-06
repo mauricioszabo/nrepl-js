@@ -112,34 +112,59 @@ export async function scopeEval({ cdp, scriptId, filePath, code }) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function findTarget(ast) {
-  const exported = [];
+// Returns true when `node` is a function/arrow with at least one breakable statement.
+function hasBreakableBody(node) {
+  if (!node) return false;
+  if (node.type === 'FunctionExpression' || node.type === 'FunctionDeclaration') {
+    return node.body?.type === 'BlockStatement' && node.body.body.length > 0;
+  }
+  if (node.type === 'ArrowFunctionExpression') {
+    return (node.body?.type === 'BlockStatement' && node.body.body.length > 0) ||
+           node.body?.type !== 'BlockStatement'; // concise arrow — expression itself is breakable
+  }
+  return false;
+}
 
+function findTarget(ast) {
   for (const node of ast.body) {
-    // exports.foo = function() / () => …
+    // CJS: exports.foo = fn   OR   module.exports.foo = fn
     if (
       node.type === 'ExpressionStatement' &&
       node.expression.type === 'AssignmentExpression' &&
       node.expression.left.type === 'MemberExpression' &&
-      node.expression.left.object.type === 'Identifier' &&
-      node.expression.left.object.name === 'exports' &&
       node.expression.left.property.type === 'Identifier'
     ) {
+      const obj = node.expression.left.object;
+      const exportName = node.expression.left.property.name;
       const rhs = node.expression.right;
-      if (rhs.type === 'FunctionExpression' || rhs.type === 'ArrowFunctionExpression') {
-        const body = rhs.body;
-        // Need at least one breakable statement inside the function.
-        if (body.type === 'BlockStatement' && body.body.length > 0) {
-          exported.push({ kind: 'cjs-export', exportName: node.expression.left.property.name, name: node.expression.left.property.name, fn: rhs });
-        } else if (body.type !== 'BlockStatement') {
-          // Concise arrow body — the expression itself is breakable.
-          exported.push({ kind: 'cjs-export', exportName: node.expression.left.property.name, name: node.expression.left.property.name, fn: rhs });
+      const isExports = obj.type === 'Identifier' && obj.name === 'exports';
+      const isModuleExportsProp = (
+        obj.type === 'MemberExpression' &&
+        obj.object.type === 'Identifier' && obj.object.name === 'module' &&
+        obj.property.type === 'Identifier' && obj.property.name === 'exports'
+      );
+      if ((isExports || isModuleExportsProp) && hasBreakableBody(rhs)) {
+        return { kind: 'cjs', exportName, name: exportName, fn: rhs };
+      }
+    }
+
+    // ESM: export function foo() {}   OR   export const foo = () => {}
+    if (node.type === 'ExportNamedDeclaration' && node.declaration) {
+      const decl = node.declaration;
+      if (decl.type === 'FunctionDeclaration' && decl.id && hasBreakableBody(decl)) {
+        return { kind: 'esm', exportName: decl.id.name, name: decl.id.name, fn: decl };
+      }
+      if (decl.type === 'VariableDeclaration') {
+        for (const vd of decl.declarations) {
+          if (vd.id?.type === 'Identifier' && hasBreakableBody(vd.init)) {
+            return { kind: 'esm', exportName: vd.id.name, name: vd.id.name, fn: vd.init };
+          }
         }
       }
     }
   }
 
-  return exported[0] ?? null;
+  return null;
 }
 
 function pauseLocation(target) {
@@ -148,10 +173,16 @@ function pauseLocation(target) {
     const first = body.body[0];
     return { lineNumber: first.loc.start.line - 1, columnNumber: first.loc.start.column };
   }
-  // Concise arrow body.
+  // Concise arrow body — the expression itself is breakable.
   return { lineNumber: body.loc.start.line - 1, columnNumber: body.loc.start.column };
 }
 
 function buildCallExpr(filePath, target) {
-  return `require(${JSON.stringify(filePath)}).${target.exportName}()`;
+  const key = JSON.stringify(target.exportName);
+  const path = JSON.stringify(filePath);
+  if (target.kind === 'esm') {
+    // Fire-and-forget async IIFE so import() doesn't block Runtime.evaluate.
+    return `(async()=>{try{const __m=await import(${path});__m[${key}]()}catch(__e){}})()`;
+  }
+  return `require(${path})[${key}]()`;
 }

@@ -21,7 +21,10 @@ export async function handleEval({ msg, session, cdp, scripts, send }) {
         const res = await patchScript(cdp, scriptId, code);
         if (res.status !== 'Ok') {
           const detail = res.exceptionDetails ? formatException(res.exceptionDetails).text : '';
-          send({ id: msg.id, session: session.id, err: `patch failed: ${res.status}${detail ? ': ' + detail : ''}\n` });
+          const hint = res.status === 'BlockedByActiveGenerator'
+            ? ' (an async function or generator is active on the call stack; wait for it to yield or complete and retry)'
+            : '';
+          send({ id: msg.id, session: session.id, err: `patch failed: ${res.status}${detail ? ': ' + detail : ''}${hint}\n` });
           send({ id: msg.id, session: session.id, status: ['done', 'patch-failed'] });
           return;
         }
