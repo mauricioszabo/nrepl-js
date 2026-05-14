@@ -5,10 +5,12 @@
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { start } from '../src/index.js';
+import readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
+import { formatTargetList, listTargets, selectTarget, start } from '../src/index.js';
 
 function parseArgs(argv) {
-  const args = { port: 0, host: '127.0.0.1', inspectHost: '127.0.0.1', inspectPort: 9229, spawn: null, writePortFile: true, debug: false };
+  const args = { port: 0, host: '127.0.0.1', inspectHost: '127.0.0.1', inspectPort: 9229, inspectTarget: null, listTargets: false, spawn: null, writePortFile: true, debug: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
@@ -16,6 +18,8 @@ function parseArgs(argv) {
     else if (a === '--host') args.host = next();
     else if (a === '--inspect-host') args.inspectHost = next();
     else if (a === '--inspect-port') args.inspectPort = Number(next());
+    else if (a === '--target') args.inspectTarget = next();
+    else if (a === '--list-targets') args.listTargets = true;
     else if (a === '--spawn') args.spawn = next();
     else if (a === '--no-port-file') args.writePortFile = false;
     else if (a === '--debug') args.debug = true;
@@ -27,6 +31,8 @@ Usage: nrepl-js [options]
   --host <h>            bind host (default: 127.0.0.1)
   --inspect-host <h>    inspector host (default: 127.0.0.1)
   --inspect-port <p>    inspector port (default: 9229)
+  --target <text>       attach to target whose title/url/id/type partially matches text
+  --list-targets        list inspector targets and exit
   --spawn <file>        spawn 'node --inspect=0 <file>' and attach to it
   --no-port-file        don't write .nrepl-port to cwd
   --debug               log incoming (<-) and outgoing (->) nREPL messages to stdout
@@ -58,6 +64,57 @@ async function spawnInspected(file) {
   return { child, inspectPort: port };
 }
 
+async function chooseTarget(args) {
+  const targets = await listTargets({ host: args.inspectHost, port: args.inspectPort });
+  const debuggable = targets.filter((target) => target.webSocketDebuggerUrl);
+
+  if (args.listTargets) {
+    console.log(formatTargetList(targets));
+    process.exit(0);
+  }
+
+  if (args.inspectTarget) {
+    const target = selectTarget(targets, args.inspectTarget);
+    return { target, wsUrl: target.webSocketDebuggerUrl };
+  }
+
+  if (debuggable.length <= 1) {
+    const target = selectTarget(targets);
+    return { target, wsUrl: target.webSocketDebuggerUrl };
+  }
+
+  console.log('Inspector targets:');
+  console.log(formatTargetList(debuggable));
+
+  if (!process.stdin.isTTY) {
+    throw new Error('multiple inspector targets found; pass --target <title-or-url-substring>');
+  }
+
+  const rl = readline.createInterface({ input, output });
+  try {
+    const answer = (await rl.question('Select target by number or partial text: ')).trim();
+    if (!answer) throw new Error('no target selected');
+
+    const n = Number(answer);
+    if (Number.isInteger(n) && n >= 1 && n <= debuggable.length) {
+      const target = debuggable[n - 1];
+      return { target, wsUrl: target.webSocketDebuggerUrl };
+    }
+
+    const target = selectTarget(debuggable, answer);
+    return { target, wsUrl: target.webSocketDebuggerUrl };
+  } finally {
+    rl.close();
+  }
+}
+
+function targetLabel(target) {
+  const title = target?.title || '(untitled)';
+  const type = target?.type || 'unknown';
+  const url = target?.url || '';
+  return `${title} [${type}]${url ? ` ${url}` : ''}`;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let child;
@@ -67,15 +124,18 @@ async function main() {
     args.inspectPort = r.inspectPort;
   }
 
+  const selected = await chooseTarget(args);
+
   const handle = await start({
     inspectHost: args.inspectHost,
     inspectPort: args.inspectPort,
+    inspectWsUrl: selected.wsUrl,
     port: args.port,
     host: args.host,
     debug: args.debug,
   });
 
-  console.log(`nREPL server listening on ${args.host}:${handle.port} (attached to inspector ${args.inspectHost}:${args.inspectPort})`);
+  console.log(`nREPL server listening on ${args.host}:${handle.port} (attached to ${targetLabel(selected.target)} at ${args.inspectHost}:${args.inspectPort})`);
 
   if (args.writePortFile) {
     try {
