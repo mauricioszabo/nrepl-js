@@ -53,7 +53,7 @@ function addDebugPoint(cdp, url, file, path) {
     url,
     lineNumber: loc.start.line,
     // columnNumber: loc.start.c,
-    condition: `(${addWatchCmd}) && console.log('Adding watch', '${file}', ${loc.start.line}) || false`
+    condition: `(${addWatchCmd}) && false`
   });
 
   res.then( r => console.log("Added debugger", file, loc.start.line, r))

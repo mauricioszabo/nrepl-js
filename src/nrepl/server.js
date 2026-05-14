@@ -58,8 +58,7 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', 
     //   awaitPromise: true,
     // })
 
-    if( ev.url.match(/pulsar.text.editor/) ) {
-      // setTimeout(() => instrumentSource(cdp, ev), 200)
+    if( !ev.url.match(/node_modules/) ) {
       instrumentSource(cdp, ev)
     }
     // console.log("EVENT", ev)
