@@ -2,104 +2,162 @@
 // patcher (when the client passed `file` and the code is a set of named
 // top-level decls that already exist in that script).
 
-import { formatRemoteObject, formatException } from '../format.js';
-import { parseAsTopLevelDecls, patchScript, findTopLevelDecl } from '../patch.js';
-import { scopeEval } from '../scope-eval.js';
-import * as acorn from 'acorn';
+import { parseResult } from './format.js';
 
 export async function handleEval({ msg, session, cdp, scripts, send }) {
   const code = msg.code ?? '';
   const file = msg.file;
 
+  console.log("EVAL\n", code)
   if (file) {
-    const scriptId = scripts.scriptIdForPath(file);
-    const decls = parseAsTopLevelDecls(code);
+    const watchPointsRes = await cdp.send('Runtime.evaluate', {
+      expression: `globalThis.__lazuli?.watchPoints["${file}"]`,
+      returnByValue: true
+    })
 
-    // Named top-level declarations → live-patch the script.
-    if (scriptId && decls) {
-      try {
-        const res = await patchScript(cdp, scriptId, code);
-        if (res.status !== 'Ok') {
-          const detail = res.exceptionDetails ? formatException(res.exceptionDetails).text : '';
-          const hint = res.status === 'BlockedByActiveGenerator'
-            ? ' (an async function or generator is active on the call stack; wait for it to yield or complete and retry)'
-            : '';
-          send({ id: msg.id, session: session.id, err: `patch failed: ${res.status}${detail ? ': ' + detail : ''}${hint}\n` });
-          send({ id: msg.id, session: session.id, status: ['done', 'patch-failed'] });
-          return;
-        }
-        send({ id: msg.id, session: session.id, value: '#patched ' + res.names.join(',') });
-        send({ id: msg.id, session: session.id, status: ['done'] });
-        return;
-      } catch (err) {
-        send({ id: msg.id, session: session.id, err: 'patch error: ' + err.message + '\n' });
-        send({ id: msg.id, session: session.id, status: ['done', 'patch-failed'] });
-        return;
-      }
+    if(watchPointsRes.result.type == 'undefined') {
+      send({ id: msg.id, session: session.id, ex: noWatch(file), status: ['done', 'error'] })
+      return
     }
-
-    // Expression/statement (not top-level decls) with a known file → scope eval.
-    if (scriptId && !decls) {
-      try {
-        const res = await scopeEval({ cdp, scriptId, filePath: file, code });
-        if (res.exceptionDetails) {
-          const { text, className } = formatException(res.exceptionDetails);
-          send({ id: msg.id, session: session.id, err: text + '\n' });
-          send({ id: msg.id, session: session.id, ex: className, 'root-ex': className });
-          send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
-        } else {
-          send({ id: msg.id, session: session.id, value: formatRemoteObject(res.result) });
-          send({ id: msg.id, session: session.id, status: ['done'] });
-        }
-        return;
-      } catch (err) {
-        send({ id: msg.id, session: session.id, err: 'scope eval error: ' + err.message + '\n' });
-        send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
-        return;
-      }
+    const watchPoints = watchPointsRes.result.value
+    let row
+    for (row = msg.line; row > -1; row--) {
+      if(watchPoints[row]) break
     }
-  }
-
-  // Default path: Runtime.evaluate against the session's execution context.
-  session.lastEvalId = msg.id;
-  try {
-    const res = await cdp.send('Runtime.evaluate', {
-      expression: code,
-      objectGroup: 'nrepl',
-      includeCommandLineAPI: true,
-      generatePreview: true,
-      returnByValue: false,
-      awaitPromise: true,
-      replMode: true,
-      contextId: session.contextId ?? undefined,
-    });
-
-    if (res.exceptionDetails) {
-      const { text, className } = formatException(res.exceptionDetails);
-      send({ id: msg.id, session: session.id, err: text + '\n' });
-      send({ id: msg.id, session: session.id, ex: className, 'root-ex': className });
-      send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
-    } else {
-      send({ id: msg.id, session: session.id, value: formatRemoteObject(res.result) });
-      send({ id: msg.id, session: session.id, status: ['done'] });
+    if(row == -1) {
+      send({ id: msg.id, session: session.id, ex: noWatch(file), status: ['done', 'error'] })
+      return
     }
-  } catch (err) {
-    send({ id: msg.id, session: session.id, err: 'eval transport error: ' + err.message + '\n' });
-    send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
-  } finally {
-    session.lastEvalId = null;
+    const normalizedCode = code.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    const watchPoint = await cdp.send('Runtime.evaluate', {
+      expression: `globalThis.__lazuli?.watchPoints["${file}"][${row}]`,
+      // generatePreview: true
+    })
+
+    console.log("HIT WATCH", `globalThis.__lazuli?.watchPoints["${file}"][${row}]`)
+
+    const evalResult = await cdp.send('Runtime.callFunctionOn', {
+      objectId: watchPoint.result.objectId,
+      functionDeclaration: 'function(text) { return this(text) }',
+      arguments: [{value: code}]
+    })
+    const parsedResult = JSON.stringify({result: await parseResult(cdp, evalResult.result)})
+    console.log("PARSED", parsedResult)
+    send({ id: msg.id, session: session.id, value: parsedResult, status: ['done'] })
+  } else {
+    const normalizedCode = code.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    const evalResult = await cdp.send('Runtime.evaluate', {
+      expression: `globalThis.__lazuli?.watchPoints["${file}"][${row}]("${normalizedCode}")`,
+      // generatePreview: true
+    })
+    const parsedResult = JSON.stringify({result: await parseResult(cdp, evalResult.result)})
+    send({ id: msg.id, session: session.id, value: parsedResult, status: ['done'] })
   }
 }
 
-function allDeclsExist(_cdp, _scriptId, decls, _scripts) {
-  // We don't fetch the source up front (that would double our CDP traffic).
-  // Existence will be re-checked inside spliceDecls; we only need a
-  // best-effort signal that the user's intent is "patch", not "evaluate".
-  // If any decl looks like it could be a redefinition (i.e., we have a file
-  // and the code parsed as named decls), call it a patch.
-  return decls.length > 0;
-}
+// import repl from 'node:repl';
+// let r = true
+// async function parseResult(cdp, result, depth = 0) {
+//   console.log("RES", depth, result)
+//   // global.cdp = cdp
+//   // global.result = result
+//   // if(r) {
+//   //   const server = repl.start({
+//   //     prompt: '> ',
+//   //     useColors: true,
+//   //   });
+//   //   r = false
+//   // }
+//
+//   if(!result) {
+//     return
+//   }
+//   switch(result.type) {
+//     case('string'):
+//       return ["string", result.description || result.value]
+//     case('undefined'):
+//       return ["literal", 'undefined']
+//     case('number'):
+//       return ["number", result.description]
+//     case('boolean'):
+//       return ["boolean", result.value, result.value ? 1 : 0]
+//     case('object'):
+//       if(result.subtype == 'null') return ['literal', 'null']
+//       if(depth < 10) {
+//         const res = await cdp.send('Runtime.getProperties', {
+//           objectId: result.objectId,
+//           ownProperties: true,
+//         })
+//         const keyvals = res.result.filter(i => typeof i.name == 'string').map(i => {
+//           console.log("KEYVAL", i.name, i)
+//           return parseResult(cdp, i.value, depth + 1).then(parsedVal => {
+//             return [["literal", i.name], parsedVal]
+//           })
+//         })
+//         if(result.subtype === 'array') {
+//           return [
+//             'coll', result.className === 'Array' ? '': `Object [${result.className}] `,
+//             '[', ', ', ']',
+//             (await Promise.all(keyvals)).map(e => e[1])
+//           ]
+//         } else {
+//           return [
+//             'map', result.className === 'Object' ? '': `[object ${result.className}] `,
+//             '{', ': ', ', ', '}',
+//             await Promise.all(keyvals)
+//           ]
+//         }
+//       } else {
+//         if(result.className === 'Object') {
+//           return ['...', '[object]', result.objectId]
+//         } else {
+//           return ['...', `${result.className} {...}`, result.objectId]
+//         }
+//       }
+//     case('function'):
+//       // const res = await cdp.send('Runtime.getProperties', {
+//       //   objectId: result.objectId,
+//       //   ownProperties: true,
+//       // })
+//       // console.log("FUN", res)
+//       if(result.className === 'Function') {
+//         let descr = '[function]'
+//         const match = result.description.match(/(class|function) ([^\s\(]+)/)
+//         if(match) {
+//           descr = `[${match[0]}]`
+//         }  else if(result.description.indexOf('[native code]') > -1) {
+//           descr = '[native function]'
+//         }
+//         return [ "literal", descr]
+//       } else {
+//         return ["literal", result.className]
+//       }
+//     default:
+//       return ["literal", result.description || result.value]
+//       // obj.preview.properties.map(code
+//   }
+//
+//   // cdp.send('Runtime.getProperties', {
+//   //   objectId: result.result.objectId,
+//   //   ownProperties: true,
+//   //   accessorPropertiesOnly: false,
+//   //   generatePreview: true
+//   // }).then(a => res = a)
+//
+//
+//   // result
+//   // switch(result.type) {
+//   //   case 'undefined':
+//   //     return 'undefined'
+//   //   default:
+//   //     if(result.value) {
+//   //
+//   //     } else {
+//   //       return JSON.stringify(result.description)
+//   //     }
+//   // }
+// }
 
-// Exposed for tests.
-export { findTopLevelDecl as _findTopLevelDecl };
-export const _acorn = acorn;
+function noWatch(file) {
+  return JSON.stringify(['literal', `No watch points reachable for ${file}`])
+}

@@ -11,6 +11,7 @@ import path from 'node:path';
 export function createScriptRegistry(cdp) {
   const byId = new Map();      // scriptId -> { url, path, source? }
   const byPath = new Map();    // absolute path -> scriptId
+  const byUrl = new Map();     // script URL -> scriptId
 
   cdp.on('Debugger.scriptParsed', (params) => {
     const url = params.url || '';
@@ -20,10 +21,20 @@ export function createScriptRegistry(cdp) {
     }
     byId.set(params.scriptId, { url, path: p });
     if (p) byPath.set(p, params.scriptId);
+    if (url) byUrl.set(url, params.scriptId);
   });
 
   return {
     scriptIdForPath(file) {
+      const abs = path.resolve(file);
+      return byPath.get(abs) ?? null;
+    },
+    scriptIdForUrl(url) {
+      return byUrl.get(url) ?? null;
+    },
+    scriptIdForFile(file) {
+      if (!file) return null;
+      if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(file)) return byUrl.get(file) ?? null;
       const abs = path.resolve(file);
       return byPath.get(abs) ?? null;
     },

@@ -2,6 +2,8 @@
 
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import { reloadCommonJS } from '../cjs-reload.js';
+import { formatException } from '../format.js';
 import { handleEval } from './eval.js';
 
 const SUPPORTED_OPS = {
@@ -11,7 +13,7 @@ const SUPPORTED_OPS = {
   eval: { doc: 'Evaluate code in a session. Pass `file` to enable live-patch routing.' },
   'ls-sessions': { doc: 'List active sessions.' },
   interrupt: { doc: 'Interrupt the running eval (best-effort via Runtime.terminateExecution).' },
-  'load-file': { doc: 'Load contents of a file as eval (file content in `file`, optional `file-path`).' },
+  'load-file': { doc: 'Load contents of a file; live-edits an already-loaded script when `file-path` or `file-name` matches one.' },
 };
 
 export async function dispatch({ msg, ctx, send }) {
@@ -73,17 +75,75 @@ async function opEval({ msg, ctx, send }) {
 }
 
 async function opLoadFile({ msg, ctx, send }) {
-  const session = ctx.sessions.get(msg.session);
-  if (!session) {
-    send({ id: msg.id, status: ['done', 'error', 'unknown-session'] });
-    return;
-  }
-  let code = msg.file;
-  if (!code && msg['file-path']) code = await fs.readFile(msg['file-path'], 'utf8');
-  await handleEval({
-    msg: { ...msg, op: 'eval', code, file: msg['file-path'] ?? msg['file-name'] ?? undefined },
-    session, cdp: ctx.cdp, scripts: ctx.scripts, send,
-  });
+//   console.log("LODAD", msg)
+//   const session = ctx.sessions.get(msg.session);
+//   if (!session) {
+//     send({ id: msg.id, status: ['done', 'error', 'unknown-session'] });
+//     return;
+//   }
+//   let code = msg.file;
+//   if (code === undefined && msg['file-path']) code = await fs.readFile(msg['file-path'], 'utf8');
+//   if (code === undefined) {
+//     send({ id: msg.id, session: session.id, err: 'load-file requires `file` content or `file-path`\n' });
+//     send({ id: msg.id, session: session.id, status: ['done', 'error'] });
+//     return;
+//   }
+//
+//   const file = msg['file-path'] ?? msg['file-name'] ?? undefined;
+//   if (file) {
+//     try {
+//       const res = await reloadCommonJS({
+//         cdp: ctx.cdp,
+//         filePath: file,
+//         source: code,
+//         contextId: session.contextId,
+//       });
+//       if (res.ok) {
+//         const mode = res.mutated ? 'cjs-hmr' : 'cjs-reload';
+//         const note = res.replaced ? ' (exports object replaced; existing references may not update)' : '';
+//         send({ id: msg.id, session: session.id, value: `#loaded ${res.filename ?? file} (${mode})${note}` });
+//         send({ id: msg.id, session: session.id, status: ['done'] });
+//         return;
+//       }
+//
+//       if (res.reason === 'compile-error' || res.reason === 'eval-error' || res.reason === 'no-result') {
+//         const detail = res.exceptionDetails ? formatException(res.exceptionDetails).text : res.error;
+//         send({ id: msg.id, session: session.id, err: `load-file cjs reload failed: ${detail ?? res.reason}\n` });
+//         send({ id: msg.id, session: session.id, status: ['done', 'eval-error'] });
+//         return;
+//       }
+//     } catch {
+//       // Browser targets and non-Node runtimes can reject the CommonJS probe.
+//       // Fall through to V8 LiveEdit below.
+//     }
+//   }
+//
+//   const scriptId = ctx.scripts.scriptIdForFile?.(file) ?? null;
+//   console.log("SCRIPT ID", scriptId)
+//   if (scriptId) {
+//     try {
+//       const res = await liveEditScript(ctx.cdp, scriptId, code);
+//       if (res.status !== 'Ok') {
+//         const detail = res.exceptionDetails ? formatException(res.exceptionDetails).text : '';
+//         send({ id: msg.id, session: session.id, err: `load-file live edit failed: ${res.status}${detail ? ': ' + detail : ''}\n` });
+//         send({ id: msg.id, session: session.id, status: ['done', 'patch-failed'] });
+//         return;
+//       }
+//
+//       send({ id: msg.id, session: session.id, value: '#loaded ' + (file ?? scriptId) });
+//       send({ id: msg.id, session: session.id, status: ['done'] });
+//       return;
+//     } catch (err) {
+//       send({ id: msg.id, session: session.id, err: 'load-file live edit error: ' + err.message + '\n' });
+//       send({ id: msg.id, session: session.id, status: ['done', 'patch-failed'] });
+//       return;
+//     }
+//   }
+//
+//   await handleEval({
+//     msg: { ...msg, op: 'eval', code, file },
+//     session, cdp: ctx.cdp, scripts: ctx.scripts, send,
+//   });
 }
 
 async function opInterrupt({ msg, ctx, send }) {

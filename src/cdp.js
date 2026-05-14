@@ -41,7 +41,13 @@ export async function connect(wsUrl, { retryMs = 3000 } = {}) {
     if (msg.id !== undefined && pending.has(msg.id)) {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
-      if (msg.error) reject(Object.assign(new Error(msg.error.message || 'CDP error'), { code: msg.error.code, data: msg.error.data }));
+      if (msg.error) {
+        if( (msg.error.message ?? '').match(/breakpoint.*exists./i) ) {
+          resolve({})
+        } else {
+          reject(Object.assign(new Error(msg.error.message || 'CDP error'), { code: msg.error.code, data: msg.error.data }));
+        }
+      }
       else resolve(msg.result ?? {});
       return;
     }

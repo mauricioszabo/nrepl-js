@@ -6,7 +6,8 @@ import net from 'node:net';
 import fs from 'node:fs';
 import { encode, decode } from '../bencode.js';
 import { dispatch } from './ops.js';
-import { attachConsole } from '../console.js';
+import {instrumentSource} from './patch-functions.js';
+import { parseResult, formatRemoteObject, formatException} from './format.js';
 
 // Open /dev/tty so debug output goes directly to the terminal even when
 // stdout is piped to a parent process (e.g. an editor reading nREPL over stdio).
@@ -26,7 +27,7 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', 
   let defaultContextId;
   try {
     const ctxs = await cdp.send('Runtime.enable');
-    defaultContextId = ctxs?.context?.id;
+    defaultContextId = ctxs.context.id;
   } catch {}
   // Runtime.enable on Node typically does not return the context; we instead
   // capture it from the executionContextCreated event below.
@@ -51,7 +52,26 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', 
   try { await cdp.send('Debugger.enable'); } catch {}
   try { await cdp.send('Runtime.runIfWaitingForDebugger'); } catch {}
 
-  attachConsole(cdp, ({ stream, text, contextId }) => {
+  cdp.on("Debugger.scriptParsed", async (ev) => {
+    // const result = await cdp.send('Runtime.evaluate', {
+    //   expression: "global.__lazuli ||= { watchPoints: {}, watchPointsIds: {}, sources: {}}",
+    //   awaitPromise: true,
+    // })
+
+    if( ev.url.match(/pulsar.text.editor/) ) {
+      // setTimeout(() => instrumentSource(cdp, ev), 200)
+      instrumentSource(cdp, ev)
+    }
+    // console.log("EVENT", ev)
+  });
+
+  let firstPause = true
+  cdp.on("Debugger.paused", ev => {
+    if (firstPause) cdp.send("Debugger.resume")
+    firstPause = false
+  })
+
+  attachConsole(cdp, ({ stream, text, structured }) => {
     const writers = [];
     for (const conn of ctx.connections) writers.push((m) => conn.send(m));
     // If there's an active eval, attribute output to that session/eval; else
@@ -60,13 +80,18 @@ export async function startServer({ cdp, scripts, port = 0, host = '127.0.0.1', 
     if (active) {
       for (const conn of ctx.connections) {
         if (!conn.sessions.has(active.id)) continue;
-        conn.send({ id: active.lastEvalId ?? '0', session: active.id, [stream]: text });
+        conn.send({
+          id: active.lastEvalId ?? '0',
+          session: active.id,
+          [stream]: text,
+          structured
+        });
       }
       return;
     }
     for (const conn of ctx.connections) {
       for (const sid of conn.sessions) {
-        conn.send({ id: '0', session: sid, [stream]: text });
+        conn.send({ id: '0', session: sid, [stream]: text, structured });
       }
     }
   });
@@ -116,4 +141,25 @@ function handleConnection(socket, ctx, dbg) {
 
   socket.on('close', () => { ctx.connections.delete(conn); });
   socket.on('error', () => {});
+}
+
+const STDERR_TYPES = new Set(['error', 'warn', 'assert', 'exception']);
+function attachConsole(cdp, onMessage) {
+  cdp.on('Runtime.consoleAPICalled', (p) => {
+    const stream = STDERR_TYPES.has(p.type) ? 'err' : 'out';
+    const text = (p.args ?? []).map(formatRemoteObject).join(' ') + '\n';
+    const structuredLog = (p.args ?? []).map( async object =>
+      object.type === 'string' ?
+        { string: object.value } :
+        { structured: await parseResult(cdp, object)}
+    )
+    Promise.all(structuredLog).then(l => {
+      onMessage({ stream, text, structured: l.concat([{string: "\n"}]) });
+    })
+  });
+
+  cdp.on('Runtime.exceptionThrown', (p) => {
+    const text = formatException(p.exceptionDetails);
+    onMessage({ stream: 'err', text: text + '\n'});
+  });
 }

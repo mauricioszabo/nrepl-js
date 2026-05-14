@@ -11,6 +11,7 @@ const STDERR_TYPES = new Set(['error', 'warn', 'assert', 'exception']);
 
 export function attachConsole(cdp, onMessage) {
   cdp.on('Runtime.consoleAPICalled', (p) => {
+    console.log("Console", p)
     const stream = STDERR_TYPES.has(p.type) ? 'err' : 'out';
     const text = (p.args ?? []).map(formatRemoteObject).join(' ') + '\n';
     onMessage({ stream, text, contextId: p.executionContextId });
