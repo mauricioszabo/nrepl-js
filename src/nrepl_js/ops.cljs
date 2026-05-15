@@ -1,6 +1,6 @@
 (ns nrepl-js.ops
   (:require ["node:crypto" :refer [randomUUID]]
-            [nrepl-js.eval :as ev]
+            [nrepl-js.evaluate :as evaluate]
             [promesa.core :as p]))
 
 (def ^:private supported-ops
@@ -40,11 +40,11 @@
       (send #js {:id (.-id msg) :status (array "done" "error" "unknown-session")})
       (do
         (set! (.-activeEvalSession ctx) session)
-        (-> (ev/handle-eval {:msg msg
-                             :session session
-                             :cdp (.-cdp ctx)
-                             :scripts (.-scripts ctx)
-                             :send send})
+        (-> (evaluate/handle-eval {:msg msg
+                                   :session session
+                                   :cdp (.-cdp ctx)
+                                   :scripts (.-scripts ctx)
+                                   :send send})
             (p/finally (fn [] (set! (.-activeEvalSession ctx) nil))))))))
 
 (defn- op-interrupt [{:keys [^js msg ^js ctx send]}]

@@ -26,14 +26,15 @@
 
     (.on socket "data"
          (fn [chunk]
-           (reset! buf (if (pos? (.-length @buf))
-                         (js/Buffer.concat (array @buf chunk))
-                         chunk))
+           (let [current (or @buf (js/Buffer.alloc 0))]
+             (reset! buf (if (pos? (.-length current))
+                           (js/Buffer.concat (array current chunk))
+                           chunk)))
            (p/loop []
              (let [r (bc/decode @buf)]
                (when r
-                 (reset! buf (.-rest r))
-                 (let [^js msg (.-value r)
+                 (reset! buf (:rest r))
+                 (let [^js msg (:value r)
                        send (.-send conn)]
                    (when dbg (dbg (str " <- " (js/JSON.stringify msg))))
                    (let [before (new js/Set (.keys (.-sessions ctx)))]
@@ -43,10 +44,9 @@
                                                :err (str "op error: " (.-message err) "\n")
                                                :status (array "done" "error")})))
                          (p/then (fn [_]
-                                   (.forEach (.keys (.-sessions ctx))
-                                             (fn [sid]
-                                               (when-not (.has before sid)
-                                                 (.add sessions sid))))
+                                   (doseq [sid (js/Array.from (.keys (.-sessions ctx)))]
+                                     (when-not (.has before sid)
+                                       (.add sessions sid)))
                                    (when (and (= (.-op msg) "close") (.-session msg))
                                      (.delete sessions (.-session msg)))
                                    (p/recur)))))))))))

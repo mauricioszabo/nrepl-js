@@ -1,4 +1,4 @@
-(ns nrepl-js.eval
+(ns nrepl-js.evaluate
   (:require [nrepl-js.format :as fmt]
             [promesa.core :as p]))
 
@@ -43,10 +43,18 @@
                              :status (array "done")})))))))
       (let [normalized-code (.replace (.replace code #"\\" "\\\\") #"\"" "\\\"")]
         (p/let [^js eval-result (.call (.-send cdp) cdp "Runtime.evaluate"
-                                       #js {:expression (str "globalThis.__lazuli?.watchPoints[\"" file "\"][" js/undefined "]"
+                                       #js {:expression (str "eval"
                                                              "(\"" normalized-code "\")")})
-                parsed-result (fmt/parse-result cdp (.-result eval-result))]
-          (send #js {:id (.-id msg)
-                     :session (.-id session)
-                     :value (js/JSON.stringify #js {:result parsed-result})
-                     :status (array "done")}))))))
+                parsed-result (fmt/parse-result cdp (.-result eval-result))
+                key (if (.-exceptionDetails eval-result) :ex :value)]
+          (def eval-result eval-result)
+          (def parsed-result parsed-result)
+          (if (.-exceptionDetails eval-result)
+            (send #js {:id (.-id msg)
+                       :session (.-id session)
+                       :ex (js/JSON.stringify #js {:result parsed-result})
+                       :status #js ["done" "error"]})
+            (send #js {:id (.-id msg)
+                       :session (.-id session)
+                       :value (js/JSON.stringify #js {:result parsed-result})
+                       :status #js ["done"]})))))))
