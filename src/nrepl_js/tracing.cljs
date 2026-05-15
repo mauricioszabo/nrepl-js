@@ -1,6 +1,6 @@
 (ns nrepl-js.tracing
   (:require ["node:fs/promises" :as fs]
-            [promesa.core :as p]))
+            [nrepl-js.cdp-interop :as cdp]))
 
 (defn- add-debug-point [^js cdp url file ^js path]
   (let [loc (.. path -node -body -loc)]
@@ -12,26 +12,25 @@
                                "[" (dec line) "] = (code) => eval(code)")
             condition (str "(" add-watch-cmd ") && false")]
         (js/console.log "Adding debugger" file line)
-        (-> (.call (.-send cdp) cdp "Debugger.setBreakpointByUrl"
-                   #js {:url url
-                        :lineNumber line
-                        :condition condition})
-            (.then (fn [r] (js/console.log "Added debugger" file line r)))
-            (.catch (fn [r] (js/console.log "Failed debugger" file line r))))))))
+        (-> (cdp/call cdp "Debugger.setBreakpointByUrl"
+                      {:url url
+                       :lineNumber line
+                       :condition condition})
+            (.then (fn [r] (prn "Added debugger" file line r)))
+            (.catch (fn [r] (prn "Failed debugger" file line r))))))))
 
-(defn instrument-source [^js cdp ^js ev]
-  (let [url (.-url ev)
+(defn instrument-source [^js cdp ev]
+  (let [url (:url ev)
         file-name (.replace url #"file://" "")]
     (-> (.readFile fs file-name "utf-8")
-        (.catch (fn [_] nil))
         (.then (fn [contents]
-                 (when contents
-                   (js/console.log "Instrumenting?" file-name)
-                   (let [parsed (js* "require('@babel/parser').parse(~{})" contents)
-                         add-fn (fn [path] (add-debug-point cdp url file-name path))]
-                     (js* "require('@babel/traverse').default(~{}, {
-                       FunctionDeclaration:  function(p) { ~{}(p) },
-                       ObjectMethod:         function(p) { ~{}(p) },
-                       ClassMethod:          function(p) { ~{}(p) },
-                       ClassPrivateMethod:   function(p) { ~{}(p) }
-                     })" parsed add-fn add-fn add-fn add-fn))))))))
+                 (js/console.log "Instrumenting?" file-name)
+                 (let [parsed (js* "require('@babel/parser').parse(~{})" contents)
+                       add-fn (fn [path] (add-debug-point cdp url file-name path))]
+                   (js* "require('@babel/traverse').default(~{}, {
+                       FunctionDeclaration: function(p) { ~{}(p) },
+                       ObjectMethod: function(p) { ~{}(p) },
+                       ClassMethod: function(p) { ~{}(p) },
+                       ClassPrivateMethod: function(p) { ~{}(p) }
+                     })" parsed add-fn add-fn add-fn add-fn))))
+        (.catch (fn [_] nil)))))
