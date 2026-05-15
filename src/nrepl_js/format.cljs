@@ -1,5 +1,6 @@
 (ns nrepl-js.format
-  (:require [promesa.core :as p]))
+  (:require [promesa.core :as p]
+            [nrepl-js.cdp-interop :as cdp]))
 
 (declare parse-result)
 
@@ -48,63 +49,62 @@
         (or (.-description exc) (.-value exc) (.-text ed) "Error")
         (or (.-text ed) "Error")))))
 
-(defn parse-result
+(declare parse-result)
+(defn- ^:async parse-kv [cdp i depth]
+  #js [#js["literal" (:name i)]
+       (await (parse-result cdp (:value i) (inc depth)))])
+
+(defn ^:async parse-result
   ([cdp result] (parse-result cdp result 0))
   ([^js cdp ^js result depth]
    (when result
-     (let [t (.-type result)]
-       (cond
-         (= t "string")
-         (p/resolved (array "string" (or (.-description result) (.-value result))))
+     (case (:type result)
+       "undefined"
+       #js ["literal" "undefined"]
 
-         (= t "undefined")
-         (p/resolved (array "literal" "undefined"))
+       ("string" "number" "boolean")
+       #js [(:type result) (:description result (:value result))]
 
-         (= t "number")
-         (p/resolved (array "number" (.-description result)))
+       "object"
+       (if (= (:subtype result) "null")
+         #js ["literal" "null"]
+         (if (< depth 10)
+           (let [res (await (cdp/call cdp
+                                      "Runtime.getProperties"
+                                      (assoc result :ownProperties true)))]
+             (if (= (:subtype result) "array")
+               #js ["coll"
+                    (if (= (:className result) "Array") "" (str "Object [" (:className result) "] "))
+                    "[" ", " "]"
+                    (->> (:result res)
+                         (filter #(re-find #"^\d+$" (:name ^js %)))
+                         (map #(parse-result cdp (:value ^js %) (inc depth)))
+                         p/all
+                         await
+                         into-array)]
+               #js ["map"
+                    (if (= (:className result) "Object") "" (str "[object " (:className result) "] "))
+                    "{" ": " ", " "}"
+                    (->> (:result res)
+                         (filter #(string? (:name ^js %)))
+                         (map #(parse-kv cdp % depth))
+                         p/all
+                         await
+                         into-array)]))
+           (if (= (:className result) "Object")
+             #js ["..." "[object]" (:objectId result)]
+             #js ["..." (str (:className result) " {...}") (:objectId result)])))
 
-         (= t "boolean")
-         (p/resolved (array "boolean" (.-value result) (if (.-value result) 1 0)))
+       (= t "function")
+       (if (= (:className result) "Function")
+         (let [descr (let [desc (:description result)
+                           m (when desc (re-find #"(class|function) ([^\s\(]+)" desc))]
+                       (cond
+                         m (str "[" (first m) "]")
+                         (and desc (.includes desc "[native code]")) "[native function]"
+                         :else "[function]"))]
+           #js ["literal" descr])
+         #js ["literal" (:className result)])
 
-         (= t "object")
-         (if (= (.-subtype result) "null")
-           (p/resolved (array "literal" "null"))
-           (if (< depth 10)
-             (p/let [^js res (.call (.-send cdp) cdp "Runtime.getProperties"
-                                    #js {:objectId (.-objectId result) :ownProperties true})]
-               (if (= (.-subtype result) "array")
-                 (let [keyvals (->> (array-seq (.-result res))
-                                    (filter #(re-find #"^\d+$" (.-name ^js %)))
-                                    (map #(parse-result cdp (.-value ^js %) (inc depth))))]
-                   (p/let [resolved (p/all keyvals)]
-                     (array "coll"
-                            (if (= (.-className result) "Array") "" (str "Object [" (.-className result) "] "))
-                            "[" ", " "]"
-                            (into-array resolved))))
-                 (let [keyvals (->> (array-seq (.-result res))
-                                    (filter #(string? (.-name ^js %)))
-                                    (map (fn [^js i]
-                                           (p/let [parsed-val (parse-result cdp (.-value i) (inc depth))]
-                                             (array (array "literal" (.-name i)) parsed-val)))))]
-                   (p/let [resolved (p/all keyvals)]
-                     (array "map"
-                            (if (= (.-className result) "Object") "" (str "[object " (.-className result) "] "))
-                            "{" ": " ", " "}"
-                            (into-array resolved))))))
-             (if (= (.-className result) "Object")
-               (p/resolved (array "..." "[object]" (.-objectId result)))
-               (p/resolved (array "..." (str (.-className result) " {...}") (.-objectId result))))))
-
-         (= t "function")
-         (if (= (.-className result) "Function")
-           (let [descr (let [desc (.-description result)
-                             m (when desc (re-find #"(class|function) ([^\s\(]+)" desc))]
-                         (cond
-                           m (str "[" (first m) "]")
-                           (and desc (.includes desc "[native code]")) "[native function]"
-                           :else "[function]"))]
-             (p/resolved (array "literal" descr)))
-           (p/resolved (array "literal" (.-className result))))
-
-         :else
-         (p/resolved (array "literal" (or (.-description result) (.-value result)))))))))
+       :else
+       #js ["literal" (or (:description result) (:value result))]))))

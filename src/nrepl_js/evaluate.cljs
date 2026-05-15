@@ -1,60 +1,73 @@
 (ns nrepl-js.evaluate
   (:require [nrepl-js.format :as fmt]
-            [promesa.core :as p]))
+            [promesa.core :as p]
+            [nrepl-js.cdp-interop :as cdp]))
+
+(defn- watch-point-expression
+  ([file] (str "globalThis.__lazuli?.watchPoints[" (js/JSON.stringify file) "]"))
+  ([file row] (str (watch-point-expression file) "[" row "]")))
+
+(defn- result-json [parsed-result]
+  (js/JSON.stringify #js {:result parsed-result}))
 
 (defn- no-watch [file]
   (js/JSON.stringify (array "literal" (str "No watch points reachable for " file))))
 
-(defn handle-eval [{:keys [msg session cdp scripts send]}]
-  (let [^js msg msg
-        ^js session session
-        ^js cdp cdp
-        code (or (.-code msg) "")
-        file (.-file msg)]
-    (js/console.log "EVAL\n" code)
-    (if file
-      (p/let [^js wp-res (.call (.-send cdp) cdp "Runtime.evaluate"
-                                #js {:expression (str "globalThis.__lazuli?.watchPoints[\"" file "\"]")
-                                     :returnByValue true})]
-        (if (= (.. wp-res -result -type) "undefined")
-          (send #js {:id (.-id msg) :session (.-id session)
-                     :ex (no-watch file) :status (array "done" "error")})
-          (let [watch-points (.. wp-res -result -value)]
-            (let [row (loop [r (.-line msg)]
-                        (cond
-                          (< r 0) -1
-                          (aget watch-points r) r
-                          :else (recur (dec r))))]
-              (if (= row -1)
-                (send #js {:id (.-id msg) :session (.-id session)
-                           :ex (no-watch file) :status (array "done" "error")})
-                (p/let [^js watch-point (.call (.-send cdp) cdp "Runtime.evaluate"
-                                               #js {:expression (str "globalThis.__lazuli?.watchPoints[\"" file "\"][" row "]")})
-                        _ (js/console.log "HIT WATCH" (str "globalThis.__lazuli?.watchPoints[\"" file "\"][" row "]"))
-                        ^js eval-result (.call (.-send cdp) cdp "Runtime.callFunctionOn"
-                                               #js {:objectId (.. watch-point -result -objectId)
-                                                    :functionDeclaration "function(text) { return this(text) }"
-                                                    :arguments (array #js {:value code})})
-                        parsed-result (fmt/parse-result cdp (.-result eval-result))]
-                  (js/console.log "PARSED" (js/JSON.stringify #js {:result parsed-result}))
-                  (send #js {:id (.-id msg)
-                             :session (.-id session)
-                             :value (js/JSON.stringify #js {:result parsed-result})
-                             :status (array "done")})))))))
-      (let [normalized-code (.replace (.replace code #"\\" "\\\\") #"\"" "\\\"")]
-        (p/let [^js eval-result (.call (.-send cdp) cdp "Runtime.evaluate"
-                                       #js {:expression (str "eval"
-                                                             "(\"" normalized-code "\")")})
-                parsed-result (fmt/parse-result cdp (.-result eval-result))
-                key (if (.-exceptionDetails eval-result) :ex :value)]
-          (def eval-result eval-result)
-          (def parsed-result parsed-result)
-          (if (.-exceptionDetails eval-result)
-            (send #js {:id (.-id msg)
-                       :session (.-id session)
-                       :ex (js/JSON.stringify #js {:result parsed-result})
-                       :status #js ["done" "error"]})
-            (send #js {:id (.-id msg)
-                       :session (.-id session)
-                       :value (js/JSON.stringify #js {:result parsed-result})
-                       :status #js ["done"]})))))))
+(defn- send-result! [send msg session field parsed-result status]
+  (send (assoc {:id (:id msg)
+                :session (:id session)
+                :status status}
+               field
+               (result-json parsed-result))))
+
+(defn- send-no-watch! [send msg session file]
+  (send {:id (:id msg)
+         :session (:id session)
+         :ex (no-watch file)
+         :status ["done" "error"]}))
+
+(defn- runtime-evaluate [cdp expression]
+  (cdp/call cdp "Runtime.evaluate" {:expression expression}))
+
+(defn- ^:async watch-points-for-file [cdp file]
+  (let [result (await (.send cdp "Runtime.evaluate"
+                             #js {:expression (watch-point-expression file)
+                                  :returnByValue true}))
+        result (.-result result)]
+    (when-not (= "undefined" (.-type result))
+      (mapv int (js/Object.keys (.-value result))))))
+
+(defn- find-watch-row [watch-points line]
+  (->> ##Inf
+       (conj watch-points)
+       (partition 2 1)
+       (some (fn [[f l]] (and (<= f line l) f)))))
+
+(defn- call-watch-point [cdp ^js watch-point code]
+  (cdp/call cdp "Runtime.callFunctionOn"
+            {:objectId (-> watch-point :result :objectId)
+             :functionDeclaration "function(text) { return this(text) }"
+             :arguments [{:value code}]}))
+
+(defn- parse-eval-result [cdp ^js eval-result]
+  (fmt/parse-result cdp (:result eval-result)))
+
+(defn ^:async handle-eval [{:keys [msg session cdp send] :as request}]
+  (let [code (or (:code msg) "")]
+    (if-let [file (:file msg)]
+      (let [watch-points-result (await (watch-points-for-file cdp file))]
+        (def watch-points-result watch-points-result)
+
+        (if watch-points-result
+          (if-let [row (find-watch-row watch-points-result (:line msg))]
+            (p/let [watch-point (runtime-evaluate cdp (watch-point-expression file row))
+                    eval-result (call-watch-point cdp watch-point code)
+                    parsed-result (parse-eval-result cdp eval-result)]
+              (send-result! send msg session :value parsed-result ["done"]))
+            (send-no-watch! send msg session file))
+          (send-no-watch! send msg session file)))
+      (p/let [eval-result (runtime-evaluate cdp (str "eval(" (js/JSON.stringify code) ")"))
+              parsed-result (parse-eval-result cdp eval-result)]
+        (if (:exceptionDetails eval-result)
+          (send-result! send msg session :ex parsed-result ["done" "error"])
+          (send-result! send msg session :value parsed-result ["done"]))))))
