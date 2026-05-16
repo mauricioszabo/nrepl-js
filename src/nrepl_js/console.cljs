@@ -12,15 +12,15 @@
                  text (str (.join (into-array (map fmt/format-remote-object args)) " ") "\n")
                  structured-log (map (fn [^js obj]
                                        (if (= (.-type obj) "string")
-                                         (p/resolved #js {:string (.-value obj)})
+                                         (p/resolved {:string (.-value obj)})
                                          (p/let [result (fmt/parse-result cdp obj)]
-                                           #js {:structured result})))
+                                           {:structured result})))
                                      args)]
              (-> (p/all structured-log)
                  (p/then (fn [l]
                            (on-message {:stream stream
                                         :text text
-                                        :structured (conj (vec l) #js {:string "\n"})})))))))
+                                        :structured (conj (vec l) {:string "\n"})})))))))
 
   (.call (.-on cdp) cdp "Runtime.exceptionThrown"
          (fn [^js params]

@@ -24,7 +24,7 @@
                                         :port port
                                         :host host
                                         :debug debug})]
-     (let [{:keys [server port host ^js ctx]} result]
+     (let [{:keys [server port host ctx]} result]
        {:port port
         :host host
         :cdp conn
@@ -33,9 +33,8 @@
         :close (fn []
                  (p/do
                    (.call (.-close conn) conn)
-                   (.forEach (.-connections ctx)
-                             (fn [^js c]
-                               (try (.destroy (.-socket c)) (catch :default _))))
+                   (doseq [{:keys [^js socket]} (vals @(:connections ctx))]
+                     (try (.destroy socket) (catch :default _)))
                    (p/create (fn [resolve _]
                                (.close server (fn [] (resolve nil)))))))}))))
 

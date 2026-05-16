@@ -100,9 +100,14 @@
          (let [descr (let [desc (:description result)
                            m (when desc (re-find #"(class|function) ([^\s\(]+)" desc))]
                        (cond
-                         m (str "[" (first m) "]")
-                         (and desc (.includes desc "[native code]")) "[native function]"
-                         :else "[function]"))]
+                         m
+                         (str "[" (first m) "]")
+
+                         (and desc (.includes desc "[native code]"))
+                         "[native function]"
+
+                         :else
+                         "[function]"))]
            #js ["literal" descr])
          #js ["literal" (:className result)])
 

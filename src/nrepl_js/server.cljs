@@ -109,17 +109,16 @@
             (when (nil? @(:default-context-id ctx))
               (reset! (:default-context-id ctx) (get-in params [:context :id])))))
 
-  (cdp/on cdp "Debugger.scriptParsed"
-          (fn [{:keys [url] :as ev}]
-            (when-not (re-find #"node_modules" (or url ""))
-              (tracing/instrument-source cdp ev))))
+  (tracing/start-trace! cdp)
 
   (let [first-pause? (atom true)]
+    (def cdp cdp)
     (cdp/on cdp "Debugger.paused"
-            (fn [_]
-              (when @first-pause?
-                (ignore-cdp-error (cdp/call cdp "Debugger.resume")))
-              (reset! first-pause? false)))))
+            (fn [ev]
+              ; (when @first-pause?
+              ;   (ignore-cdp-error (cdp/call cdp "Debugger.resume")))
+              ; (reset! first-pause? false)
+              (def ev ev)))))
 
 (defn- console-response [{:keys [stream text structured]} id session]
   (assoc {:id id
@@ -158,3 +157,14 @@
           :port (.-port (.address server))
           :host host
           :ctx ctx})))))
+
+
+#_
+(->> ev :callFrames
+     (map :location))
+#_
+(cdp/call cdp "Debugger.evaluateOnCallFrame"
+          {;:callFrameId (-> ev :callFrames first :callFrameId)
+           :expression  "props"
+           :returnByValue false
+           :generatePreview true})
