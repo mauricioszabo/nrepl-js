@@ -24,13 +24,17 @@
         file-name (.replace url #"file://" "")]
     (-> (.readFile fs file-name "utf-8")
         (.then (fn [contents]
-                 (js/console.log "Instrumenting?" file-name)
-                 (let [parsed (js* "require('@babel/parser').parse(~{})" contents)
-                       add-fn (fn [path] (add-debug-point cdp url file-name path))]
-                   (js* "require('@babel/traverse').default(~{}, {
-                       FunctionDeclaration: function(p) { ~{}(p) },
-                       ObjectMethod: function(p) { ~{}(p) },
-                       ClassMethod: function(p) { ~{}(p) },
-                       ClassPrivateMethod: function(p) { ~{}(p) }
-                     })" parsed add-fn add-fn add-fn add-fn))))
+                 ;; Skip files already instrumented by the Babel build plugin —
+                 ;; it installs new Function(originalNames,...) watch-points that
+                 ;; are more useful than the plain eval closure we'd set here.
+                 (when-not (js* "globalThis.__lazuli?.babelFiles?.has(~{})" file-name)
+                   (js/console.log "Instrumenting?" file-name)
+                   (let [parsed (js* "require('@babel/parser').parse(~{})" contents)
+                         add-fn (fn [path] (add-debug-point cdp url file-name path))]
+                     (js* "require('@babel/traverse').default(~{}, {
+                         FunctionDeclaration: function(p) { ~{}(p) },
+                         ObjectMethod: function(p) { ~{}(p) },
+                         ClassMethod: function(p) { ~{}(p) },
+                         ClassPrivateMethod: function(p) { ~{}(p) }
+                       })" parsed add-fn add-fn add-fn add-fn)))))
         (.catch (fn [_] nil)))))
