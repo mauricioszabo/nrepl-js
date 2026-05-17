@@ -4,6 +4,34 @@
 (def greatest-lower-bound 1)
 (def least-upper-bound 2)
 
+(def reserved-generated-identifiers
+  #{"async"
+    "await"
+    "break"
+    "case"
+    "catch"
+    "class"
+    "const"
+    "continue"
+    "default"
+    "do"
+    "else"
+    "export"
+    "finally"
+    "for"
+    "function"
+    "if"
+    "import"
+    "let"
+    "new"
+    "return"
+    "switch"
+    "throw"
+    "try"
+    "var"
+    "while"
+    "yield"})
+
 (defn- traverse [parsed f]
   (js* "require('@babel/traverse').default(~{}, { enter: function(p) { ~{}(p); } })"
        parsed f))
@@ -103,22 +131,45 @@
     (when (and line (some? column))
       {:line line :column column})))
 
+(defn- original-position [^js consumer line column]
+  (let [pos (.originalPositionFor consumer #js {:line line
+                                                :column column})
+        source (.-source pos)
+        name (.-name pos)]
+    (when source
+      {:source source
+       :line (.-line pos)
+       :column (.-column pos)
+       :name name})))
+
 (defn- generated-candidates [consumer source-name line column]
   (->> [greatest-lower-bound least-upper-bound nil]
        (keep #(generated-position consumer source-name line column %))
        distinct))
 
-(defn- generated-identifier-for [consumer generated-lines source-name ^js loc]
+(defn- generated-identifier-for [consumer generated-lines source-name original-name ^js loc]
   (let [^js start (.-start loc)
         line (.-line start)
         column (.-column start)]
     (->> (generated-candidates consumer source-name line column)
          (keep (fn [pos]
                  (when-let [identifier (identifier-at generated-lines pos)]
-                   (assoc pos
-                          :name (:name identifier)
-                          :start-column (:start-column identifier)
-                          :end-column (:end-column identifier)))))
+                   (let [original (original-position consumer
+                                                     (:line pos)
+                                                     (:start-column identifier))]
+                     (assoc pos
+                            :name (:name identifier)
+                            :start-column (:start-column identifier)
+                            :end-column (:end-column identifier)
+                            :source-map-name (:name original)
+                            :source-map-source (:source original)
+                            :source-map-loc (when original
+                                              {:line (:line original)
+                                               :column (:column original)}))))))
+         (sort-by (fn [{:keys [name source-map-name source-map-source]}]
+                    [(if (= source-map-name original-name) 0 1)
+                     (if (= source-map-source source-name) 0 1)
+                     (if (contains? reserved-generated-identifiers name) 1 0)]))
          first)))
 
 (defn- generated-range-for [consumer source-name ^js loc]
@@ -156,11 +207,33 @@
       (some-> path .-parent .-key .-name)
       "<anonymous>"))
 
+(defn- binding-locs [^js binding]
+  (let [^js identifier (.-identifier binding)
+        declaration-loc (.-loc identifier)
+        reference-locs (->> (array-seq (or (.-referencePaths binding) #js []))
+                            (keep (fn [^js path]
+                                    (some-> path .-node .-loc))))]
+    (vec (remove nil? (cons declaration-loc reference-locs)))))
+
+(defn- generated-identifier-for-binding [consumer generated-lines source-name original-name ^js binding]
+  (->> (binding-locs binding)
+       (keep (fn [loc]
+               (generated-identifier-for consumer
+                                         generated-lines
+                                         source-name
+                                         original-name
+                                         loc)))
+       (remove #(contains? reserved-generated-identifiers (:name %)))
+       first))
+
 (defn- binding-entry [consumer generated-lines source-name original-name ^js binding]
-  (let [identifier (.-identifier binding)
+  (let [^js identifier (.-identifier binding)
         loc (.-loc identifier)
-        generated (when loc
-                    (generated-identifier-for consumer generated-lines source-name loc))]
+        generated (generated-identifier-for-binding consumer
+                                                    generated-lines
+                                                    source-name
+                                                    original-name
+                                                    binding)]
     {:original original-name
      :generated (:name generated)
      :kind (.-kind binding)
@@ -168,7 +241,9 @@
      :generated-loc (when generated
                       {:line (:line generated)
                        :column (:start-column generated)
-                       :end-column (:end-column generated)})}))
+                       :end-column (:end-column generated)})
+     :source-map-name (:source-map-name generated)
+     :source-map-loc (:source-map-loc generated)}))
 
 (defn- bindings-for-scope [consumer generated-lines source-name ^js scope]
   (let [bindings (.-bindings scope)]
