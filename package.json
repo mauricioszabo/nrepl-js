@@ -1,0 +1,35 @@
+{
+  "name": "nrepl-js",
+  "version": "0.1.0",
+  "description": "nREPL server for Node.js, backed by the V8 Inspector (--inspect)",
+  "type": "module",
+  "bin": {
+    "nrepl-js": "./bin/nrepl-js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./babel-plugin": "./src/babel_plugin_nrepl.js",
+    "./vite-plugin": "./src/vite_plugin_nrepl.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/parser": "^7.29.3",
+    "@babel/traverse": "^7.29.0",
+    "acorn": "^8.12.1",
+    "acorn-walk": "^8.3.4",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}
